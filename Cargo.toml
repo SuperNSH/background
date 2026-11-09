@@ -1,0 +1,10 @@
+[package]
+name = "nsh-background"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Periodic and deferred work while the app is backgrounded, within OS limits."
+repository = "https://github.com/SuperNSH/background"
+publish = false
+
+[dependencies]
