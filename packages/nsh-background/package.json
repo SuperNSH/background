@@ -1,0 +1,16 @@
+{
+  "name": "nsh-background",
+  "version": "0.1.0",
+  "description": "Background fetch and deferred work for Native Shell TSX apps, with background_fetch and workmanager's names",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "repository": "https://github.com/SuperNSH/background"
+}
