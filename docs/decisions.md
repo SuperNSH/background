@@ -6,7 +6,7 @@ None. The three STEP 0 questions are settled below. The work they leave pending 
 
 ## Decided
 
-1. **NSH version: 0.4.0 from crates.io.** It is the released line the rest of the SuperNSH set is on: `longbridge/nsh` publishes 0.4.0 and `SuperNSH/biometrics` pins `nsh-core = "0.4.0"` (checked in `.refs/nsh/Cargo.toml` and `.refs/biometrics/crates/nsh-biometrics/Cargo.toml`). Nothing in this area needs an unreleased `main`-branch feature — the scheduling is our own engine.
+1. **NSH version: 0.5.0 from crates.io.** The crate started on 0.4.0, the released line the rest of the SuperNSH set was on (`SuperNSH/biometrics` pinned `nsh-core = "0.4.0"`), and moved to 0.5.0 with the set on 2026-11-11, the day it shipped. Nothing in this area needs an unreleased `main`-branch feature — the scheduling is our own engine.
 2. **Approach: one `Backend` trait, in-process engine first.** The first backend is a tokio-timer engine inside the app's process — the brief's "desktop threads otherwise" line, applied to every target — with per-target floors. Native OS schedulers (BGTaskScheduler, WorkManager, Windows `BackgroundTaskBuilder`) are pending per-platform integration behind the same trait; until one lands, the in-process engine is the behavior for as long as the process lives.
 3. **Platforms: apple, android, windows and linux in; web out.** The four are in-process engine targets with pinned floors: apple and android 15 minutes, windows and linux none. Web is an unsupported target and every entry point fails with the coded `NotAvailable` error (`ERR_BACKGROUND_NOT_AVAILABLE`).
 4. **Native-to-TSX event delivery waits for an NSH bridge.** Until one exists, the native module's `configure` drops events and the TS class keeps its callbacks for when it lands.
