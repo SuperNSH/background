@@ -98,7 +98,7 @@ Every failure is one of these kinds. Codes and messages are stable.
 
 ## Verification
 
-What can be verified where. CI is configured to compile every platform file — the `cross-check` matrix cross-clippies `aarch64-apple-ios-sim`, `aarch64-linux-android`, `wasm32-unknown-unknown` and `x86_64-pc-windows-gnu`, and the `rust` job compiles `linux.rs` natively — but no push has run the four-entry matrix yet, so it is unverified until a run is green (AGENTS.md: a claim with no passing run is unverified). No claim of local verification outruns this list.
+What can be verified where. CI is configured to compile every platform file — the `cross-check` matrix cross-clippies `aarch64-apple-ios-sim`, `aarch64-linux-android`, `wasm32-unknown-unknown` and `x86_64-pc-windows-gnu`, and the `rust` job compiles `linux.rs` natively — and run 44381445909 on `master` (https://github.com/SuperNSH/background/actions/runs/44381445909) passed all six jobs: `rust`, `typescript` and the four cross-check entries. Rows are verified by that run only to the extent a job compiles or runs them; the bullets below say which. No claim of local verification outruns this list.
 
 - `apple.rs` — compiles and tests on the macOS host (`target_vendor = "apple"` is the host's own cfg).
 - `windows.rs` — cross-clippies on the host under `x86_64-pc-windows-gnu`, and in CI through the matrix's `x86_64-pc-windows-gnu` entry once the matrix has run.
