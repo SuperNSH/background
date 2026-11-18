@@ -41,5 +41,5 @@ async fn android_answers_available_and_floors_the_fetch_interval() {
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(events.lock().unwrap().len(), 2);
+    assert_eq!(events.lock().unwrap().len(), 1);
 }

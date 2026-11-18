@@ -104,7 +104,8 @@ What can be verified where. CI is configured to compile every platform file — 
 - `windows.rs` — cross-clippies on the host under `x86_64-pc-windows-gnu`, and in CI through the matrix's `x86_64-pc-windows-gnu` entry once the matrix has run.
 - `wasm32-unknown-unknown` — cross-clippies on the host; its cfg selects `UnsupportedBackend`.
 - `linux.rs` — CI only: compiled natively by the ubuntu-latest `rust` job.
-- `android.rs` — CI only: compiled by the `cross-check` matrix's `aarch64-linux-android` entry.
+- `android.rs` — CI only: compiled by the `cross-check` matrix's `aarch64-linux-android` entry, with `tests/android.rs` (`--all-targets`)..
+- `tests/windows.rs` — same, compiled by the `x86_64-pc-windows-gnu` entry. Both are compile-only: no runner executes them, so their assertions are unexercised (a deliberately wrong assertion passed that matrix on run 44381174285).
 - `aarch64-unknown-linux-gnu` — not checkable on the host. The rustup target is installed, but `nsh-core` -> `rustls` -> `ring` needs a C cross-compiler the machine does not have; ring's build script fails.
 
 ## Known gaps

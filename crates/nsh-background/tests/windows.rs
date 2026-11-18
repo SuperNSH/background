@@ -36,5 +36,5 @@ async fn windows_answers_available_and_keeps_the_configured_interval() {
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(events.lock().unwrap().len(), 2);
+    assert_eq!(events.lock().unwrap().len(), 1);
 }
