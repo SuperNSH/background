@@ -1,15 +1,26 @@
 //! The scheduler and work manager as TSX sees them: `NativeBackgroundFetch`, a class whose
-//! async members reject with a `code` on failure. Events stay on the Rust side until an NSH
-//! bridge delivers them (see `docs/parity.md`).
+//! async members reject with a `code` on failure. Events reach TSX by pull: the handler the
+//! crate configures queues them, and TSX awaits `nextEvent` in a loop of its own.
 
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    pin::pin,
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
+use nsh_core::JsonValue;
 use nsh_core::prelude::*;
+use tokio::sync::Notify;
 
 use crate::{
     BackgroundError, BackgroundFetch, BackoffPolicy, Constraints, ErrorKind,
-    ExistingPeriodicWorkPolicy, ExistingWorkPolicy, FetchConfig, NetworkType, OneOffOptions,
-    PeriodicOptions, TaskConfig, TaskType, WorkInfo, WorkState, Workmanager,
+    ExistingPeriodicWorkPolicy, ExistingWorkPolicy, FetchConfig, Input, InputValue, NetworkType,
+    OneOffOptions, PeriodicOptions, TaskConfig, TaskEvent, TaskType, WorkInfo, WorkState,
+    Workmanager,
 };
 
 /// The fetch settings, from TSX. Unset fields keep the defaults; minutes become seconds.
@@ -70,8 +81,7 @@ pub struct NativeTaskConfig {
     pub requires_device_idle: Option<bool>,
 }
 
-/// One-off work options, from TSX. The Rust and TS APIs carry input data; this native
-/// mirror has no input field in v0.1.
+/// One-off work options, from TSX.
 #[derive(JsObject, Clone, Debug, Default)]
 pub struct NativeOneOffOptions {
     /// How long to wait before the work runs, in milliseconds.
@@ -94,10 +104,11 @@ pub struct NativeOneOffOptions {
     pub backoff_policy_delay_ms: Option<f64>,
     /// A name to cancel the work by, besides its unique name.
     pub tag: Option<String>,
+    /// The work's input data: an object of booleans, numbers and strings.
+    pub input: Option<JsonValue>,
 }
 
-/// Periodic work options, from TSX. The Rust and TS APIs carry input data; this native
-/// mirror has no input field in v0.1.
+/// Periodic work options, from TSX.
 #[derive(JsObject, Clone, Debug, Default)]
 pub struct NativePeriodicOptions {
     /// The period the work fires on, in milliseconds. 15 minutes by default.
@@ -124,6 +135,19 @@ pub struct NativePeriodicOptions {
     pub backoff_policy_delay_ms: Option<f64>,
     /// A name to cancel the work by, besides its unique name.
     pub tag: Option<String>,
+    /// The work's input data: an object of booleans, numbers and strings.
+    pub input: Option<JsonValue>,
+}
+
+/// One event the handler received, as TSX reads it.
+#[derive(JsObject, Clone, Debug, PartialEq)]
+pub struct NativeTaskEvent {
+    /// The fetch task id, a scheduled task's own id, or a piece of work's task name.
+    pub task_id: String,
+    /// Whether the platform gave up on the task's window.
+    pub timed_out: bool,
+    /// The work's input data as an object; empty for fetch and scheduled-task events.
+    pub input: JsonValue,
 }
 
 /// What a piece of work looks like from TSX.
@@ -141,12 +165,58 @@ pub struct NativeWorkInfo {
     pub tags: Vec<String>,
 }
 
+/// The events the backend fired and TSX has not read yet. A stop clears them and wakes the
+/// reads waiting for one, which resolve `None`.
+#[derive(Default)]
+struct Events {
+    queue: Mutex<VecDeque<TaskEvent>>,
+    changed: Notify,
+    epoch: AtomicU64,
+}
+
+impl Events {
+    fn queue(&self) -> MutexGuard<'_, VecDeque<TaskEvent>> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn push(&self, event: TaskEvent) {
+        self.queue().push_back(event);
+        self.changed.notify_waiters();
+    }
+
+    /// Drops what is queued and ends the reads waiting now; a read that starts later waits again.
+    fn stop(&self) {
+        self.queue().clear();
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
+
+    /// The oldest queued event, waiting for one; `None` once a stop ended this read.
+    async fn next(&self) -> Option<TaskEvent> {
+        let started = self.epoch.load(Ordering::SeqCst);
+        loop {
+            // Registered before the checks, so an event or a stop in between wakes the wait.
+            let mut waiting = pin!(self.changed.notified());
+            waiting.as_mut().enable();
+            if self.epoch.load(Ordering::SeqCst) != started {
+                return None;
+            }
+            let queued = self.queue().pop_front();
+            if let Some(event) = queued {
+                return Some(event);
+            }
+            waiting.await;
+        }
+    }
+}
+
 /// The background scheduler and work manager in one handle. Create one and keep it; every
 /// handle shares the platform's backend.
 #[class]
 pub struct NativeBackgroundFetch {
     fetch: BackgroundFetch,
     work: Workmanager,
+    events: Arc<Events>,
 }
 
 #[class]
@@ -156,6 +226,7 @@ impl NativeBackgroundFetch {
         NativeBackgroundFetch {
             fetch: BackgroundFetch::new(),
             work: Workmanager::new(),
+            events: Arc::new(Events::default()),
         }
     }
 
@@ -165,15 +236,24 @@ impl NativeBackgroundFetch {
         Ok(i32::from(fetch.status().map_err(into_js)?.as_int()))
     }
 
-    /// Stores the fetch settings. Events are dropped until an NSH bridge delivers them.
+    /// Stores the fetch settings. Every event from now on queues for `nextEvent`.
     pub async fn configure(
         this: Instance<Self>,
         config: Option<NativeFetchConfig>,
     ) -> Result<i32, JsError> {
-        let fetch = this.with(|native| native.fetch.clone());
+        let (fetch, events) = this.with(|native| (native.fetch.clone(), native.events.clone()));
         let config = to_fetch_config(config.unwrap_or_default())?;
-        let status = fetch.configure(config, |_event| {}).map_err(into_js)?;
+        let status = fetch
+            .configure(config, move |event| events.push(event))
+            .map_err(into_js)?;
         Ok(i32::from(status.as_int()))
+    }
+
+    /// The next event the backend fired, waiting for one. Resolves `null` when a `stop` with no
+    /// task id ends the wait, which also drops the events still queued.
+    pub async fn next_event(this: Instance<Self>) -> Result<Option<NativeTaskEvent>, JsError> {
+        let events = this.with(|native| native.events.clone());
+        Ok(events.next().await.map(native_event))
     }
 
     /// Arms the periodic fetch timer. Requires `configure` first.
@@ -185,8 +265,12 @@ impl NativeBackgroundFetch {
     /// Stops the fetch and every timer, or just the task `taskId` names. An empty id is
     /// refused.
     pub async fn stop(this: Instance<Self>, task_id: Option<String>) -> Result<bool, JsError> {
-        let fetch = this.with(|native| native.fetch.clone());
-        fetch.stop(task_id.as_deref()).map_err(into_js)
+        let (fetch, events) = this.with(|native| (native.fetch.clone(), native.events.clone()));
+        let stopped = fetch.stop(task_id.as_deref()).map_err(into_js)?;
+        if task_id.is_none() {
+            events.stop();
+        }
+        Ok(stopped)
     }
 
     /// Arms a task's own timer, once or on a period.
@@ -447,7 +531,7 @@ fn to_task_config(native: NativeTaskConfig) -> Result<TaskConfig, JsError> {
 
 fn to_one_off_options(native: NativeOneOffOptions) -> Result<OneOffOptions, JsError> {
     Ok(OneOffOptions {
-        input: Vec::new(),
+        input: to_input(native.input)?,
         initial_delay: duration_ms(native.initial_delay_ms)?,
         constraints: constraints(
             native.requires_battery_not_low,
@@ -467,7 +551,7 @@ fn to_periodic_options(native: NativePeriodicOptions) -> Result<PeriodicOptions,
     Ok(PeriodicOptions {
         frequency: duration_ms(native.frequency_ms)?,
         flex_interval: duration_ms(native.flex_interval_ms)?,
-        input: Vec::new(),
+        input: to_input(native.input)?,
         initial_delay: duration_ms(native.initial_delay_ms)?,
         constraints: constraints(
             native.requires_battery_not_low,
@@ -483,6 +567,65 @@ fn to_periodic_options(native: NativePeriodicOptions) -> Result<PeriodicOptions,
         backoff_policy_delay: duration_ms(native.backoff_policy_delay_ms)?,
         tag: native.tag,
     })
+}
+
+/// The input data of a work request: an object of booleans, numbers and strings. Whole numbers
+/// are integers, as `InputValue::Int`. Anything nested, null or an array is refused.
+fn to_input(value: Option<JsonValue>) -> Result<Input, JsError> {
+    let refused = || invalid("input must be an object of booleans, numbers and strings");
+    let fields = match value {
+        None | Some(JsonValue::Null) => return Ok(Vec::new()),
+        Some(JsonValue::Object(fields)) => fields,
+        Some(_) => return Err(refused()),
+    };
+    fields
+        .into_iter()
+        .map(|(name, field)| {
+            let value = match field {
+                JsonValue::Bool(flag) => InputValue::Bool(flag),
+                JsonValue::String(text) => InputValue::String(text),
+                JsonValue::Number(number) => match number.as_i64() {
+                    Some(whole) => InputValue::Int(whole),
+                    None => {
+                        let fraction = number.as_f64().ok_or_else(refused)?;
+                        if fraction.fract() == 0.0 && fraction.abs() < 9.0e15 {
+                            InputValue::Int(fraction as i64)
+                        } else {
+                            InputValue::Double(fraction)
+                        }
+                    }
+                },
+                _ => return Err(refused()),
+            };
+            Ok((name, value))
+        })
+        .collect()
+}
+
+/// An input back as the object TSX reads.
+fn input_object(input: Input) -> JsonValue {
+    JsonValue::Object(
+        input
+            .into_iter()
+            .map(|(name, value)| {
+                let value = match value {
+                    InputValue::Bool(flag) => JsonValue::Bool(flag),
+                    InputValue::Int(whole) => JsonValue::from(whole),
+                    InputValue::Double(fraction) => JsonValue::from(fraction),
+                    InputValue::String(text) => JsonValue::String(text),
+                };
+                (name, value)
+            })
+            .collect(),
+    )
+}
+
+fn native_event(event: TaskEvent) -> NativeTaskEvent {
+    NativeTaskEvent {
+        task_id: event.task_id,
+        timed_out: event.timed_out,
+        input: input_object(event.input),
+    }
 }
 
 fn state_name(state: WorkState) -> &'static str {
@@ -727,5 +870,149 @@ mod tests {
         assert_eq!(state_name(WorkState::Succeeded), "succeeded");
         assert_eq!(state_name(WorkState::Failed), "failed");
         assert_eq!(state_name(WorkState::Cancelled), "cancelled");
+    }
+
+    #[test]
+    fn input_data_keeps_booleans_numbers_and_strings() {
+        let input = to_input(Some(JsonValue::Object(
+            [
+                ("flag".to_owned(), JsonValue::Bool(true)),
+                ("count".to_owned(), JsonValue::from(3)),
+                ("ratio".to_owned(), JsonValue::from(0.5)),
+                ("whole".to_owned(), JsonValue::from(4.0)),
+                ("name".to_owned(), JsonValue::String("sync".to_owned())),
+            ]
+            .into_iter()
+            .collect(),
+        )))
+        .unwrap();
+        let get = |key: &str| {
+            input
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("flag"), Some(InputValue::Bool(true)));
+        assert_eq!(get("count"), Some(InputValue::Int(3)));
+        assert_eq!(get("ratio"), Some(InputValue::Double(0.5)));
+        assert_eq!(get("whole"), Some(InputValue::Int(4)));
+        assert_eq!(get("name"), Some(InputValue::String("sync".to_owned())));
+        assert_eq!(to_input(None).unwrap(), Input::new());
+        assert_eq!(to_input(Some(JsonValue::Null)).unwrap(), Input::new());
+    }
+
+    #[test]
+    fn input_data_that_is_not_flat_is_refused() {
+        let nested = JsonValue::Object(
+            [("deep".to_owned(), JsonValue::Array(Vec::new()))]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            to_input(Some(nested)).unwrap_err().code(),
+            Some("ERR_BACKGROUND_INVALID_ARGUMENT")
+        );
+        assert_eq!(
+            to_input(Some(JsonValue::String("x".to_owned())))
+                .unwrap_err()
+                .code(),
+            Some("ERR_BACKGROUND_INVALID_ARGUMENT")
+        );
+    }
+
+    #[test]
+    fn work_options_carry_their_input() {
+        let one_off = to_one_off_options(NativeOneOffOptions {
+            input: Some(JsonValue::Object(
+                [("n".to_owned(), JsonValue::from(1))].into_iter().collect(),
+            )),
+            ..NativeOneOffOptions::default()
+        })
+        .unwrap();
+        assert_eq!(one_off.input, vec![("n".to_owned(), InputValue::Int(1))]);
+        let periodic = to_periodic_options(NativePeriodicOptions {
+            input: Some(JsonValue::Object(
+                [("n".to_owned(), JsonValue::from(2))].into_iter().collect(),
+            )),
+            ..NativePeriodicOptions::default()
+        })
+        .unwrap();
+        assert_eq!(periodic.input, vec![("n".to_owned(), InputValue::Int(2))]);
+    }
+
+    #[test]
+    fn an_event_reads_back_with_its_input_as_an_object() {
+        let event = native_event(TaskEvent {
+            task_id: "sync".to_owned(),
+            timed_out: true,
+            input: vec![("n".to_owned(), InputValue::Int(7))],
+        });
+        assert_eq!(event.task_id, "sync");
+        assert!(event.timed_out);
+        assert_eq!(
+            event.input,
+            JsonValue::Object([("n".to_owned(), JsonValue::from(7))].into_iter().collect())
+        );
+    }
+
+    fn event(task_id: &str) -> TaskEvent {
+        TaskEvent {
+            task_id: task_id.to_owned(),
+            timed_out: false,
+            input: Input::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn events_come_out_in_the_order_the_handler_got_them() {
+        let events = Events::default();
+        events.push(event("a"));
+        events.push(event("b"));
+        assert_eq!(events.next().await.unwrap().task_id, "a");
+        assert_eq!(events.next().await.unwrap().task_id, "b");
+    }
+
+    #[tokio::test]
+    async fn a_read_waits_for_an_event_that_comes_later() {
+        let events = Arc::new(Events::default());
+        let reader = tokio::spawn({
+            let events = events.clone();
+            async move { events.next().await }
+        });
+        tokio::task::yield_now().await;
+        events.push(event("late"));
+        assert_eq!(reader.await.unwrap().unwrap().task_id, "late");
+    }
+
+    #[tokio::test]
+    async fn a_stop_ends_the_waiting_read_and_clears_the_queue() {
+        let events = Arc::new(Events::default());
+        let reader = tokio::spawn({
+            let events = events.clone();
+            async move { events.next().await }
+        });
+        tokio::task::yield_now().await;
+        events.stop();
+        assert_eq!(reader.await.unwrap(), None);
+
+        events.push(event("stale"));
+        events.stop();
+        events.push(event("fresh"));
+        assert_eq!(events.next().await.unwrap().task_id, "fresh");
+    }
+
+    #[tokio::test]
+    async fn the_configured_handler_queues_what_the_backend_fires() {
+        let backend = crate::FakeBackend::new();
+        let fetch = BackgroundFetch::with_backend(backend.clone());
+        let events = Arc::new(Events::default());
+        let sink = events.clone();
+        fetch
+            .configure(FetchConfig::default(), move |event| sink.push(event))
+            .unwrap();
+        backend.emit("task-1", false, vec![("n".to_owned(), InputValue::Int(1))]);
+        let got = events.next().await.unwrap();
+        assert_eq!(got.task_id, "task-1");
+        assert_eq!(got.input, vec![("n".to_owned(), InputValue::Int(1))]);
     }
 }

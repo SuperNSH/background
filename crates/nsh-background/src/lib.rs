@@ -30,7 +30,7 @@ pub use fake::FakeBackend;
 pub use local::{Limits, LocalBackend};
 pub use native::{
     NativeBackgroundFetch, NativeFetchConfig, NativeOneOffOptions, NativePeriodicOptions,
-    NativeTaskConfig, NativeWorkInfo,
+    NativeTaskConfig, NativeTaskEvent, NativeWorkInfo,
 };
 pub use options::{
     BackoffPolicy, Constraints, ExistingPeriodicWorkPolicy, ExistingWorkPolicy, FetchConfig, Input,

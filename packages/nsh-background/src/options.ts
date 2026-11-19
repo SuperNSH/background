@@ -129,7 +129,7 @@ export interface WorkInfo {
 
 /** The options of one piece of one-off work. Unset fields keep the defaults. */
 export interface OneOffOptions {
-  /** The work's input data. Recorded here; the native module carries none in v0.1 (docs/parity.md). */
+  /** The work's input data: an object of booleans, numbers and strings, which comes back on the event the work fires. */
   input?: Input;
   /** How long to wait before the work runs. Undefined runs at once. */
   initialDelayMs?: number;
@@ -147,7 +147,7 @@ export interface OneOffOptions {
 
 /** The options of one piece of periodic work. Unset fields keep the defaults. */
 export interface PeriodicOptions {
-  /** The work's input data. Recorded here; the native module carries none in v0.1 (docs/parity.md). */
+  /** The work's input data: an object of booleans, numbers and strings, which comes back on the event the work fires. */
   input?: Input;
   /** The period the work fires on, in milliseconds. 15 minutes by default. */
   frequencyMs?: number;

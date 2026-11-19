@@ -14,6 +14,7 @@ import {
   type Status,
   type TaskConfig,
   type TaskEvent,
+  type Input,
   type WorkInfo,
   type WorkRequest,
   type WorkState,
@@ -43,6 +44,7 @@ function nativeOneOffOptions(request: WorkRequest): NativeOneOffOptions {
   if (request.backoffPolicy !== undefined) options.backoffPolicy = request.backoffPolicy;
   if (request.backoffPolicyDelayMs !== undefined) options.backoffPolicyDelayMs = request.backoffPolicyDelayMs;
   if (request.tag !== undefined) options.tag = request.tag;
+  if (request.input !== undefined) options.input = request.input;
   return options;
 }
 
@@ -57,14 +59,14 @@ function nativePeriodicOptions(request: WorkRequest): NativePeriodicOptions {
   if (request.backoffPolicy !== undefined) options.backoffPolicy = request.backoffPolicy;
   if (request.backoffPolicyDelayMs !== undefined) options.backoffPolicyDelayMs = request.backoffPolicyDelayMs;
   if (request.tag !== undefined) options.tag = request.tag;
+  if (request.input !== undefined) options.input = request.input;
   return options;
 }
 
 class RustBackend implements BackgroundBackend {
   private readonly native = new NativeBackgroundFetch();
-  // The NSH event bridge is pending: the callback is kept for when it lands, and the native
-  // side drops events today (see docs/parity.md).
   private onTask: ((event: TaskEvent) => void) | null = null;
+  private pumping = false;
 
   status(): Promise<Status> {
     return this.settle(async () => toStatus(await this.native.status()));
@@ -72,15 +74,29 @@ class RustBackend implements BackgroundBackend {
 
   configure(config: FetchConfig, onTask: (event: TaskEvent) => void): Promise<Status> {
     this.onTask = onTask;
-    return this.settle(async () => toStatus(await this.native.configure(config)));
+    return this.settle(async () => {
+      const status = toStatus(await this.native.configure(config));
+      this.pump();
+      return status;
+    });
   }
 
   start(): Promise<Status> {
-    return this.settle(async () => toStatus(await this.native.start()));
+    return this.settle(async () => {
+      const status = toStatus(await this.native.start());
+      this.pump();
+      return status;
+    });
   }
 
   stop(taskId?: string | null): Promise<boolean> {
-    return this.settle(() => this.native.stop(taskId));
+    return this.settle(async () => {
+      const stopped = await this.native.stop(taskId);
+      // A stop with no task id ends the crate's waiting `nextEvent`, so the pump ends with it; the
+      // next `start` or `configure` runs one again.
+      if (taskId === undefined || taskId === null) this.pumping = false;
+      return stopped;
+    });
   }
 
   scheduleTask(config: TaskConfig): Promise<boolean> {
@@ -126,6 +142,24 @@ class RustBackend implements BackgroundBackend {
     if (by === "all") return this.settle(() => this.native.cancelAll());
     if ("uniqueName" in by) return this.settle(() => this.native.cancelByUniqueName(by.uniqueName));
     return this.settle(() => this.native.cancelByTag(by.tag));
+  }
+
+  // Pulls the crate's events, one `nextEvent` at a time, until a stop resolves it with null.
+  private pump(): void {
+    if (this.pumping) return;
+    this.pumping = true;
+    void (async () => {
+      try {
+        for (;;) {
+          const event = await this.native.nextEvent();
+          if (event === null) return;
+          this.onTask?.({ taskId: event.taskId, timedOut: event.timedOut, input: event.input as Input });
+        }
+      } catch {
+        // The native object went away: the stream simply ends.
+        this.pumping = false;
+      }
+    })();
   }
 
   private async settle<T>(operation: () => Promise<T>): Promise<T> {

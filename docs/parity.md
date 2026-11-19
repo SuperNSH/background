@@ -41,7 +41,7 @@ Same plugin, JS wrapper over the native module (`index.js`, `src/NativeBackgroun
 | `STATUS_RESTRICTED` / `STATUS_DENIED` / `STATUS_AVAILABLE` | Mirrored. |
 | `NETWORK_TYPE_NONE` / `_ANY` / `_UNMETERED` / `_NOT_ROAMING` / `_CELLULAR` | Mirrored; the five constants are the `NetworkType` enum's values. |
 | Expo config plugin (`app.plugin.js`, `expo/plugin`) | Not carried. It wires the native module into an Expo-managed build; an NSH app embeds the native module itself. |
-| TurboModule `Spec` emitter stubs (`addListener`, `removeListeners`) | Not carried. They exist only for RN's `NativeEventEmitter`; our events flow through the NSH bridge (pending, see Known gaps). |
+| TurboModule `Spec` emitter stubs (`addListener`, `removeListeners`) | Not carried. They exist only for RN's `NativeEventEmitter`; our events reach TSX by pull: the native module queues them and the TS backend awaits `nextEvent` in a loop (see Known gaps). |
 
 ## flutter_workmanager
 
@@ -52,8 +52,8 @@ Same plugin, JS wrapper over the native module (`index.js`, `src/NativeBackgroun
 | `initialize(callbackDispatcher)` | Not carried. Flutter dispatcher plumbing — `configure`'s handler is the dispatcher. |
 | `executeTask(handler, {onTaskStopped})` | Not carried, same plumbing. `BackgroundTaskStoppedHandler` and `StopReason` go with it: a task stopped by the platform is not a concept an in-process engine has. |
 | `Workmanager.iOSBackgroundTask` | Not carried. A magic `taskName` the iOS dispatcher receives; our handler gets real task ids, `FETCH_TASK_ID` for the fetch event. |
-| `registerOneOffTask(uniqueName, taskName, ...)` | Mirrored. `uniqueName`, `taskName`, `inputData`, `initialDelay`, `tag` and `existingWorkPolicy` are carried — `inputData` by the Rust and TS options only: the native bridge options (`NativeOneOffOptions` in `crates/nsh-background/src/native.rs`) expose no input field in v0.1, so work registered from TSX starts with empty input. `constraints` and the backoff arguments are accepted and recorded (rows below); `outOfQuotaPolicy`, `foregroundServiceConfig` and `expedited` are not carried (rows below). |
-| `registerPeriodicTask(uniqueName, taskName, ...)` | Mirrored, same carried set — `inputData` with the same caveat: `NativePeriodicOptions` exposes no input field in v0.1 either. `frequency` is clamped to the per-target floor (15 minutes on apple and android, none on windows and linux); `flexInterval` is accepted and recorded, no effect yet. |
+| `registerOneOffTask(uniqueName, taskName, ...)` | Mirrored. `uniqueName`, `taskName`, `inputData`, `initialDelay`, `tag` and `existingWorkPolicy` are carried — `inputData` is an object of booleans, numbers and strings in Rust, TS and the native bridge (`NativeOneOffOptions.input` in `crates/nsh-background/src/native.rs`, a `JsonValue`, whole numbers becoming integers; nested values are refused with `ERR_BACKGROUND_INVALID_ARGUMENT`) and comes back on the event the work fires. Tests: `input_data_keeps_booleans_numbers_and_strings`, `input_data_that_is_not_flat_is_refused`, `work_options_carry_their_input`, `an_event_reads_back_with_its_input_as_an_object` (unverified until CI runs them). `constraints` and the backoff arguments are accepted and recorded (rows below); `outOfQuotaPolicy`, `foregroundServiceConfig` and `expedited` are not carried (rows below). |
+| `registerPeriodicTask(uniqueName, taskName, ...)` | Mirrored, same carried set — `inputData` the same way through `NativePeriodicOptions.input`. `frequency` is clamped to the per-target floor (15 minutes on apple and android, none on windows and linux); `flexInterval` is accepted and recorded, no effect yet. |
 | `registerProcessingTask` | Not carried. An iOS `BGProcessingTaskRequest` wrapper; nothing drives it without the Apple scheduler integration. |
 | `registerHealthResearchTask` | Not carried. iOS 17+ `BGHealthResearchTaskRequest`; same reason. |
 | `registerContinuedProcessingTask` | Not carried. iOS 26+ `BGContinuedProcessingTaskRequest`; same reason. |
@@ -110,6 +110,6 @@ What can be verified where. CI is configured to compile every platform file — 
 
 ## Known gaps
 
-- Native-to-TSX event delivery is pending an NSH bridge. The native module's `configure` drops events today; the TS class keeps its callbacks for when the bridge lands.
+- Native-to-TSX event delivery is by pull, and unverified until CI runs it. NSH 0.6.0's `Callback` (`nsh-core/src/element/callback.rs`) is `Rc`-based and posts only from the engine thread, so it cannot be captured by the crate's `Send + Sync` handler; instead `configure` queues every event in the crate (`Events` in `native.rs`) and the TS backend (`packages/nsh-background/src/rust.ts`) awaits `nextEvent` in a loop. A `stop` with no task id clears the queue and resolves the waiting read `null`, which ends the loop; the next `configure` or `start` begins a new one. Rust tests: `events_come_out_in_the_order_the_handler_got_them`, `a_read_waits_for_an_event_that_comes_later`, `a_stop_ends_the_waiting_read_and_clears_the_queue`, `the_configured_handler_queues_what_the_backend_fires`; TS: `tests/rust.test.ts`. No test fires a real timer through the crate from TSX.
 - OS-level scheduling — BGTaskScheduler, WorkManager, Windows `BackgroundTaskBuilder` — is pending per-platform integration. While the process lives, the in-process engine is the behavior.
 - Web is an unsupported target and fails with the coded `NotAvailable` error.

@@ -10,7 +10,7 @@ The crate and the package exist. `crates/nsh-background` holds the Rust core; `p
 
 `.github/workflows/ci.yml` runs three jobs, on pushes to `master`, on pull requests, and on manual dispatch: `rust` (ubuntu-latest: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`); `typescript` (ubuntu-latest: installs NSH v0.6.0 through SuperNSH/nsh-builds, then `nsh check` and `nsh test` in `packages/nsh-background`); and `cross-check` (`cargo clippy --target <t> -- -D warnings` for `aarch64-apple-ios-sim` on macos-latest, and for `aarch64-linux-android`, `wasm32-unknown-unknown` and `x86_64-pc-windows-gnu` on ubuntu-latest; all but wasm32 add `--all-targets`, so `tests/android.rs` and `tests/windows.rs` compile under their targets). Run https://github.com/SuperNSH/background/actions/runs/44381445909 (commit `test: correct the Android and Windows bridge assertions`) passed all six jobs: `rust`, `typescript` and the four `cross-check` entries. The two platform tests are compile-only; no runner executes them.
 
-The limits are stated in [docs/parity.md](docs/parity.md): the engine is in-process (OS schedulers pending), native-to-TSX event delivery is pending an NSH bridge, and web is unsupported.
+The limits are stated in [docs/parity.md](docs/parity.md): the engine is in-process (OS schedulers pending), native-to-TSX events are delivered by pull (`nextEvent`), a path newer than the last CI run and unverified until CI runs it, and web is unsupported.
 
 ## Approach
 
