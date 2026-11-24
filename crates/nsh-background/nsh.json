@@ -1,0 +1,6 @@
+{
+  "nsh": ">=0.6",
+  "exports": {
+    "nsh-background": "tsx/index.ts"
+  }
+}

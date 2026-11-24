@@ -784,6 +784,7 @@ mod tests {
             backoff_policy: Some("exponential".to_owned()),
             backoff_policy_delay_ms: Some(250.0),
             tag: Some("uploads".to_owned()),
+            input: None,
         })
         .unwrap();
         assert_eq!(

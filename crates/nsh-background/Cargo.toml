@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "../../README.md"
+# crates.io finds NSH modules by this keyword.
+keywords = ["nshm", "nsh", "background"]
 
 [lib]
 name = "nsh_background"
