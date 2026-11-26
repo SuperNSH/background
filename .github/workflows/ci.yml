@@ -48,7 +48,7 @@ jobs:
         env:
           NSH_VERSION: v0.7.1
         run: |
-          curl -fsSL https://raw.githubusercontent.com/SuperNSH/nsh-builds/master/install.sh | sh
+          curl -fsSL https://nsh.dev/install.sh | sh
           echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: scripts/check-nsh-add.sh
@@ -62,7 +62,7 @@ jobs:
         env:
           NSH_VERSION: v0.7.1
         run: |
-          curl -fsSL https://raw.githubusercontent.com/SuperNSH/nsh-builds/master/install.sh | sh
+          curl -fsSL https://nsh.dev/install.sh | sh
           echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Check and test
